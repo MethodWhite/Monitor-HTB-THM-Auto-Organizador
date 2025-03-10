@@ -15,7 +15,11 @@ fi
 
 # --- Configuración inicial ---
 USER_HOME=$(eval echo ~$SUDO_USER)
-DIRECTORIOS_BASE=("$USER_HOME/HTB" "$USER_HOME/THM")
+DIRECTORIOS_BASE=(
+    "$USER_HOME/bin"     # Directorio para scripts personales
+    "$USER_HOME/HTB"     # Directorio HackTheBox
+    "$USER_HOME/THM"     # Directorio TryHackMe
+)
 DEPENDENCIAS=("inotify-tools")
 SERVICIO_SYSTEMD="/etc/systemd/system/monitor_HTB_THM.service"
 SCRIPT_MONITOR="/usr/local/bin/monitor_HTB_THM.sh"
@@ -24,7 +28,7 @@ SCRIPT_CARPETAS="/usr/local/bin/crear_carpetas.sh"
 # --- Funciones principales ---
 configurar_permisos() {
     local directorio="$1"
-    mkdir -p "$directorio"
+    [ ! -d "$directorio" ] && mkdir -p "$directorio"
     chown "$SUDO_USER:$SUDO_USER" "$directorio"
     chmod 755 "$directorio"
 }
@@ -42,10 +46,10 @@ generar_script_monitor() {
     cat << 'EOF' > "$SCRIPT_MONITOR"
 #!/bin/bash
 
-DIRECTORIOS=("$HOME/HTB" "$HOME/THM")
+DIRECTORIOS_MONITOREADOS=("$HOME/HTB" "$HOME/THM")
 
 verificar_directorios() {
-    for dir in "${DIRECTORIOS[@]}"; do
+    for dir in "${DIRECTORIOS_MONITOREADOS[@]}"; do
         if [ ! -d "$dir" ]; then
             echo "Error: Directorio $dir no encontrado"
             exit 1
@@ -66,8 +70,8 @@ monitorear_directorio() {
 
 iniciar_monitoreo() {
     verificar_directorios
-    echo "Iniciando monitoreo en: ${DIRECTORIOS[*]}"
-    for dir in "${DIRECTORIOS[@]}"; do
+    echo "Iniciando monitoreo en: ${DIRECTORIOS_MONITOREADOS[*]}"
+    for dir in "${DIRECTORIOS_MONITOREADOS[@]}"; do
         monitorear_directorio "$dir" &
     done
     wait
@@ -83,11 +87,16 @@ generar_script_carpetas() {
 
 [ -z "$1" ] && { echo "Uso: $0 <directorio>"; exit 1; }
 
-directorio="$1"
+directorio_base="$1"
 subdirectorios=("content" "exploits" "nmap" "scripts")
 
-mkdir -p "${subdirectorios[@]/#/$directorio/}"
-echo "Estructura creada en: $directorio"
+for subdir in "${subdirectorios[@]}"; do
+    directorio_completo="$directorio_base/$subdir"
+    mkdir -p "$directorio_completo"
+    chmod 755 "$directorio_completo"
+done
+
+echo "Estructura de carpetas creada en: $directorio_base"
 EOF
 }
 
@@ -113,18 +122,19 @@ EOF
 # --- Ejecución principal ---
 echo "Iniciando proceso de instalación..."
 
-# Configurar directorios base
+# Configurar directorios base (incluyendo bin)
+echo "Creando estructura de directorios..."
 for dir in "${DIRECTORIOS_BASE[@]}"; do
-    echo "Configurando directorio: $dir"
+    echo " - Configurando: $dir"
     configurar_permisos "$dir"
 done
 
 # Instalar dependencias
-echo "Verificando dependencias..."
+echo "Verificando dependencias del sistema..."
 instalar_dependencias
 
 # Generar scripts
-echo "Generando scripts..."
+echo "Generando scripts de automatización..."
 generar_script_monitor
 generar_script_carpetas
 
@@ -132,7 +142,7 @@ generar_script_carpetas
 chmod +x "$SCRIPT_MONITOR" "$SCRIPT_CARPETAS"
 
 # Configurar servicio systemd
-echo "Configurando servicio..."
+echo "Configurando servicio de monitoreo..."
 configurar_servicio_systemd
 
 # Recargar e iniciar servicio
@@ -140,5 +150,11 @@ systemctl daemon-reload
 systemctl enable --now monitor_HTB_THM.service
 
 echo "Instalación completada exitosamente."
-echo "Estado del servicio: systemctl status monitor_HTB_THM.service"
-echo "Registros del sistema: $USER_HOME/monitor_HTB_THM.log"
+echo "--------------------------------------------------"
+echo "Directorios creados:"
+printf "• %s\n" "${DIRECTORIOS_BASE[@]}"
+echo "--------------------------------------------------"
+echo "Comandos útiles:"
+echo " - Estado del servicio: systemctl status monitor_HTB_THM.service"
+echo " - Ver registros: tail -f $USER_HOME/monitor_HTB_THM.log"
+echo "--------------------------------------------------"
