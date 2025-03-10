@@ -1,131 +1,144 @@
 #!/bin/bash
 
-# --- Auto-elevación y auto asignación de permisos ---
-# Si no se ejecuta como root, se reinicia el script con sudo
+# --- Auto elevación a root ---
 if [ "$EUID" -ne 0 ]; then
-    echo "Reiniciando el script con sudo..."
-    sudo "$0" "$@"
+    echo "Reiniciando el script con privilegios de administrador..."
+    exec sudo "$0" "$@"
     exit
 fi
 
-# Auto asignar permisos de ejecución al propio script (en caso de que no tenga)
-if [ ! -x "$0" ]; then
-    echo "Asignando permisos de ejecución al instalador..."
-    chmod +x "$0"
-fi
-
-# --- Variables y creación de directorios principales ---
-# Verificar que SUDO_USER esté definido (nombre del usuario original)
+# --- Verificar ejecución mediante sudo ---
 if [ -z "$SUDO_USER" ]; then
-    echo "Error: Este script debe ejecutarse a través de sudo."
+    echo "Error: Este script requiere ejecución mediante sudo."
     exit 1
 fi
 
+# --- Configuración inicial ---
 USER_HOME=$(eval echo ~$SUDO_USER)
-HTB_DIR="$USER_HOME/HTB"
-THM_DIR="$USER_HOME/THM"
+DIRECTORIOS_BASE=("$USER_HOME/HTB" "$USER_HOME/THM")
+DEPENDENCIAS=("inotify-tools")
+SERVICIO_SYSTEMD="/etc/systemd/system/monitor_HTB_THM.service"
+SCRIPT_MONITOR="/usr/local/bin/monitor_HTB_THM.sh"
+SCRIPT_CARPETAS="/usr/local/bin/crear_carpetas.sh"
 
-# Crear directorios HTB y THM si no existen
-for DIR in "$HTB_DIR" "$THM_DIR"; do
-    if [ ! -d "$DIR" ]; then
-        echo "Creando directorio $(basename "$DIR") en $DIR..."
-        mkdir -p "$DIR"
-    fi
-done
+# --- Funciones principales ---
+configurar_permisos() {
+    local directorio="$1"
+    mkdir -p "$directorio"
+    chown "$SUDO_USER:$SUDO_USER" "$directorio"
+    chmod 755 "$directorio"
+}
 
-# --- Instalación de inotify-tools ---
-if ! command -v inotifywait &> /dev/null; then
-    echo "Instalando inotify-tools..."
-    apt update && apt install -y inotify-tools
-fi
-
-# --- Instalación del script de monitoreo ---
-echo "Instalando monitor_HTB_THM.sh..."
-cat << 'EOF' > /usr/local/bin/monitor_HTB_THM.sh
-#!/bin/bash
-
-# Directorios a monitorear (se usa $HOME del usuario que inició sesión)
-DIRS=("$HOME/HTB" "$HOME/THM")
-
-# Verificar que cada directorio exista
-for DIR in "${DIRS[@]}"; do
-    if [ ! -d "$DIR" ]; then
-        echo "Error: El directorio $DIR no existe."
-        exit 1
-    fi
-done
-
-echo "✅ Monitoreando directorios: ${DIRS[@]} ... (Presiona Ctrl+C para detener)"
-
-# Función para monitorear un directorio
-monitor_dir() {
-    local DIR="$1"
-    inotifywait -m -e create --format "%w%f" "$DIR" | while read NEW_ENTRY
-    do
-        # Si se creó un directorio, se ejecuta el script para crear los subdirectorios
-        if [ -d "$NEW_ENTRY" ]; then
-            echo "📂 Nueva carpeta detectada en $DIR: $NEW_ENTRY"
-            /usr/local/bin/crear_carpetas.sh "$NEW_ENTRY"
+instalar_dependencias() {
+    apt update
+    for paquete in "${DEPENDENCIAS[@]}"; do
+        if ! dpkg -l | grep -q "^ii  $paquete"; then
+            apt install -y "$paquete"
         fi
     done
 }
 
-# Monitorear cada directorio en segundo plano
-for DIR in "${DIRS[@]}"; do
-    monitor_dir "$DIR" &
-done
-
-# Espera a que finalicen los procesos en segundo plano
-wait
-EOF
-
-# --- Instalación del script para crear subdirectorios ---
-echo "Instalando crear_carpetas.sh..."
-cat << 'EOF' > /usr/local/bin/crear_carpetas.sh
+generar_script_monitor() {
+    cat << 'EOF' > "$SCRIPT_MONITOR"
 #!/bin/bash
 
-# Verificar que se haya proporcionado un directorio como argumento
-if [ -z "$1" ]; then
-    echo "Uso: $0 <directorio>"
-    exit 1
-fi
+DIRECTORIOS=("$HOME/HTB" "$HOME/THM")
 
-DIRECTORIO="$1"
+verificar_directorios() {
+    for dir in "${DIRECTORIOS[@]}"; do
+        if [ ! -d "$dir" ]; then
+            echo "Error: Directorio $dir no encontrado"
+            exit 1
+        fi
+    done
+}
 
-# Crear los 4 subdirectorios automáticamente
-mkdir -p "$DIRECTORIO/content" "$DIRECTORIO/exploits" "$DIRECTORIO/nmap" "$DIRECTORIO/scripts"
+monitorear_directorio() {
+    local directorio="$1"
+    inotifywait -m -e create --format "%w%f" "$directorio" | while read ruta
+    do
+        if [ -d "$ruta" ]; then
+            echo "Nuevo proyecto detectado: $ruta"
+            /usr/local/bin/crear_carpetas.sh "$ruta"
+        fi
+    done
+}
 
-echo "✅ Carpetas creadas en: $DIRECTORIO"
+iniciar_monitoreo() {
+    verificar_directorios
+    echo "Iniciando monitoreo en: ${DIRECTORIOS[*]}"
+    for dir in "${DIRECTORIOS[@]}"; do
+        monitorear_directorio "$dir" &
+    done
+    wait
+}
+
+iniciar_monitoreo
 EOF
+}
 
-# --- Auto asignación de permisos a los scripts instalados ---
-chmod +x /usr/local/bin/monitor_HTB_THM.sh
-chmod +x /usr/local/bin/crear_carpetas.sh
+generar_script_carpetas() {
+    cat << 'EOF' > "$SCRIPT_CARPETAS"
+#!/bin/bash
 
-# --- Creación del servicio systemd ---
-echo "Creando servicio systemd para monitor_HTB_THM..."
-cat << EOF > /etc/systemd/system/monitor_HTB_THM.service
+[ -z "$1" ] && { echo "Uso: $0 <directorio>"; exit 1; }
+
+directorio="$1"
+subdirectorios=("content" "exploits" "nmap" "scripts")
+
+mkdir -p "${subdirectorios[@]/#/$directorio/}"
+echo "Estructura creada en: $directorio"
+EOF
+}
+
+configurar_servicio_systemd() {
+    cat << EOF > "$SERVICIO_SYSTEMD"
 [Unit]
-Description=Monitorea la creación de carpetas en HTB y THM y ejecuta crear_carpetas.sh
+Description=Monitor de directorios HTB/THM
 After=network.target
 
 [Service]
-ExecStart=/usr/local/bin/monitor_HTB_THM.sh
+ExecStart=$SCRIPT_MONITOR
 Restart=always
 User=$SUDO_USER
 WorkingDirectory=$USER_HOME
-StandardOutput=append:/var/log/monitor_HTB_THM.log
-StandardError=append:/var/log/monitor_HTB_THM.log
+StandardOutput=append:$USER_HOME/monitor_HTB_THM.log
+StandardError=append:$USER_HOME/monitor_HTB_THM.log
 
 [Install]
 WantedBy=default.target
 EOF
+}
 
-# --- Recargar systemd, habilitar e iniciar el servicio ---
-echo "Habilitando y ejecutando el servicio monitor_HTB_THM..."
+# --- Ejecución principal ---
+echo "Iniciando proceso de instalación..."
+
+# Configurar directorios base
+for dir in "${DIRECTORIOS_BASE[@]}"; do
+    echo "Configurando directorio: $dir"
+    configurar_permisos "$dir"
+done
+
+# Instalar dependencias
+echo "Verificando dependencias..."
+instalar_dependencias
+
+# Generar scripts
+echo "Generando scripts..."
+generar_script_monitor
+generar_script_carpetas
+
+# Configurar permisos de ejecución
+chmod +x "$SCRIPT_MONITOR" "$SCRIPT_CARPETAS"
+
+# Configurar servicio systemd
+echo "Configurando servicio..."
+configurar_servicio_systemd
+
+# Recargar e iniciar servicio
 systemctl daemon-reload
-systemctl enable monitor_HTB_THM.service
-systemctl start monitor_HTB_THM.service
+systemctl enable --now monitor_HTB_THM.service
 
-echo "✅ Instalación completa. El servicio monitor_HTB_THM ya está corriendo."
-echo "Para verificar su estado, usa: systemctl status monitor_HTB_THM.service"
+echo "Instalación completada exitosamente."
+echo "Estado del servicio: systemctl status monitor_HTB_THM.service"
+echo "Registros del sistema: $USER_HOME/monitor_HTB_THM.log"
